@@ -1,7 +1,8 @@
 import math
 import random
+import time
 import numpy as np
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -15,6 +16,20 @@ class GenerateRequest(BaseModel):
     modulation: str = "QPSK"
     samples: int = 1024
     snr: float = 20.0
+
+
+class BatchRequest(BaseModel):
+    items: list[GenerateRequest]
+
+
+def validate_params(mod: str, samples: int, snr: float):
+    """Raise ValueError with a human-readable reason when params are invalid"""
+    if mod not in MODULATION_TYPES:
+        raise ValueError(f"不支持的调制方式: {mod}（支持: {'/'.join(MODULATION_TYPES)}）")
+    if not 256 <= samples <= 8192:
+        raise ValueError(f"样本数 {samples} 超出范围（256–8192）")
+    if not 0 <= snr <= 40:
+        raise ValueError(f"SNR {snr}dB 超出范围（0–40）")
 
 
 def generate_signal(mod: str, samples: int, snr: float) -> np.ndarray:
@@ -144,4 +159,51 @@ def generate_and_analyze(req: GenerateRequest):
         "waterfall": waterfall,
         "constellation": constellation,
         "modulation": modulation
+    }
+
+
+@app.post("/api/batch")
+def batch_analyze(req: BatchRequest):
+    """Run a batch of parameter sets one by one and report per-item results"""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="批量参数为空，请至少添加一组参数")
+
+    items = []
+    success_count = 0
+    total_ms = 0.0
+
+    for idx, item in enumerate(req.items):
+        start = time.perf_counter()
+        entry = {
+            "index": idx,
+            "params": {"modulation": item.modulation, "samples": item.samples, "snr": item.snr},
+            "success": False,
+            "detectedType": None,
+            "confidence": None,
+            "durationMs": 0.0,
+            "error": None,
+        }
+        try:
+            validate_params(item.modulation, item.samples, item.snr)
+            i, q = generate_signal(item.modulation, item.samples, item.snr)
+            modulation = classify_modulation(i, q)
+            entry["success"] = True
+            entry["detectedType"] = modulation["type"]
+            entry["confidence"] = modulation["confidence"]
+            success_count += 1
+        except Exception as e:
+            entry["error"] = str(e)
+        entry["durationMs"] = round((time.perf_counter() - start) * 1000, 1)
+        total_ms += entry["durationMs"]
+        items.append(entry)
+
+    n = len(items)
+    return {
+        "items": items,
+        "summary": {
+            "total": n,
+            "success": success_count,
+            "failed": n - success_count,
+            "avgDurationMs": round(total_ms / n, 1) if n else 0.0
+        }
     }
