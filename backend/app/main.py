@@ -1,5 +1,6 @@
 import math
 import random
+import time
 import numpy as np
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,12 +10,18 @@ app = FastAPI(title="RF Signal Analyzer")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODULATION_TYPES = ["AM", "FM", "BPSK", "QPSK", "16QAM"]
+MIN_SAMPLES, MAX_SAMPLES = 256, 8192
+MIN_SNR, MAX_SNR = 0.0, 40.0
 
 
 class GenerateRequest(BaseModel):
     modulation: str = "QPSK"
     samples: int = 1024
     snr: float = 20.0
+
+
+class BatchRequest(BaseModel):
+    items: list[GenerateRequest] = []
 
 
 def generate_signal(mod: str, samples: int, snr: float) -> np.ndarray:
@@ -144,4 +151,54 @@ def generate_and_analyze(req: GenerateRequest):
         "waterfall": waterfall,
         "constellation": constellation,
         "modulation": modulation
+    }
+
+
+def validate_batch_item(item: GenerateRequest):
+    """Raise ValueError with a readable reason when params are invalid"""
+    if item.modulation not in MODULATION_TYPES:
+        raise ValueError(f"不支持的调制方式: {item.modulation}（可选 { '/'.join(MODULATION_TYPES) }）")
+    if not (MIN_SAMPLES <= item.samples <= MAX_SAMPLES):
+        raise ValueError(f"样本数需在 {MIN_SAMPLES}~{MAX_SAMPLES} 之间，当前为 {item.samples}")
+    if not (MIN_SNR <= item.snr <= MAX_SNR):
+        raise ValueError(f"SNR 需在 {MIN_SNR:.0f}~{MAX_SNR:.0f} dB 之间，当前为 {item.snr}")
+
+
+def run_batch_item(item: GenerateRequest, index: int) -> dict:
+    """Run a single batch entry, capturing success/failure and elapsed time"""
+    start = time.perf_counter()
+    result = {
+        "index": index,
+        "modulation": item.modulation,
+        "samples": item.samples,
+        "snr": item.snr,
+        "success": False,
+        "error": None,
+        "durationMs": 0.0,
+        "detectedType": None,
+        "confidence": None,
+    }
+    try:
+        validate_batch_item(item)
+        i, q = generate_signal(item.modulation, item.samples, item.snr)
+        modulation = classify_modulation(i, q)
+        result["success"] = True
+        result["detectedType"] = modulation["type"]
+        result["confidence"] = modulation["confidence"]
+    except Exception as e:
+        result["error"] = str(e)
+    result["durationMs"] = round((time.perf_counter() - start) * 1000, 1)
+    return result
+
+
+@app.post("/api/batch")
+def batch_analyze(req: BatchRequest):
+    """Run a batch of parameter sets sequentially and summarize the outcome"""
+    items = [run_batch_item(item, idx) for idx, item in enumerate(req.items)]
+    success_durations = [it["durationMs"] for it in items if it["success"]]
+    return {
+        "items": items,
+        "total": len(items),
+        "successCount": len(success_durations),
+        "avgDurationMs": round(sum(success_durations) / len(success_durations), 1) if success_durations else 0.0
     }

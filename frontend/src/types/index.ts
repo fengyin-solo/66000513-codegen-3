@@ -35,4 +35,26 @@ export interface AnalysisResult {
   modulation: ModulationResult
 }
 
+export interface BatchParams {
+  modulation: string
+  samples: number
+  snr: number
+}
+
+export interface BatchItemResult extends BatchParams {
+  index: number
+  success: boolean
+  error: string | null
+  durationMs: number
+  detectedType: string | null
+  confidence: number | null
+}
+
+export interface BatchResult {
+  items: BatchItemResult[]
+  total: number
+  successCount: number
+  avgDurationMs: number
+}
+
 export const MODULATION_TYPES = ['AM', 'FM', 'BPSK', 'QPSK', '16QAM']
